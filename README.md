@@ -67,16 +67,16 @@ required databases:
 
 [CONICS](https://github.com/diazlab/CONICS) is used to check for potential copy-number variation events
 
-required input files:
+required input files for `R/CONICS.Rmd`:
 
 - chromosome_arm_positions_grch38.txt
 - gene_positions.txt  
 
 ## external datasets
 
-lung cell atlas reference
+lung cell atlas reference:
 
-- `droplet_normal_lung_seurat_ntiss10x.P2.anno.20191002.RC4.Robj` from [here](https://www.synapse.org/#!Synapse:syn21560412) converted to Seurat V3 and stored as RDS
+- `droplet_normal_lung_seurat_ntiss10x.P2.anno.20191002.RC4.Robj` from [here](https://www.synapse.org/#!Synapse:syn21560412) converted to Seurat V3 and stored as `data/seurat/travaglini_lung.rds`; epithelial cells stored as `data/seurat/travaglini_lung_epi.rds`
 
 ## paper figures
 
