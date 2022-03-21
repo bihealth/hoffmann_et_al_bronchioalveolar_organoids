@@ -1,0 +1,250 @@
+---
+title: "process lung tissue"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, warning=FALSE)
+library(Seurat)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(igraph)
+library(Matrix)
+library(tidyr)
+library(openxlsx)
+library(DESeq2)
+library(dendextend)
+options(future.globals.maxSize = 10 * 1024 * 1024^2)
+```
+
+```{r get_data}
+samples <- c('lung_219V_BSA',
+             'lung_219V_H3N2',
+             'lung_102C_BSA',
+             'lung_102C_H3N2')
+
+sobjs <- list()
+for (sample in samples) {
+  dge <- Read10X_h5(file.path('..','data','cellbender',paste0(sample,'_filtered.h5')))
+  colnames(dge) <- paste0(gsub('_','-',sample),'_',colnames(dge))
+  sobjs[[sample]] <- CreateSeuratObject(dge,project=sample,
+                                        assay='RNA',min.cells=1,min.features=500)
+}
+
+sobj <- merge(sobjs[[samples[1]]],sobjs[samples[2:length(samples)]])
+
+sobj[['donor']] <-  gsub('lung-(.*)-([BSAH3N2]*)','\\1',
+                         sobj@meta.data$orig.ident)
+sobj[['infect']] <-  ifelse(grepl('H3N2',sobj$orig.ident),'H3N2','control')
+
+sobj[['pct.mito']] <- PercentageFeatureSet(sobj, pattern='^MT-')
+sobj[['pct.ribo']] <- PercentageFeatureSet(sobj, pattern='^RP[SL][0-9]*$')
+sobj[['pct.H3N2']] <- PercentageFeatureSet(sobj, pattern='^H3N2-')
+```
+
+```{r stats}
+sobj@meta.data %>%
+  dplyr::group_by(orig.ident) %>%
+  dplyr::summarise(ncells=n(),
+                   nGene=median(nFeature_RNA),
+                   nUMI=median(nCount_RNA),
+                   pct.mito=median(pct.mito),
+                   pct.ribo=median(pct.ribo),
+                   pct.H3N2=median(pct.H3N2))
+```
+
+```{r scatter}
+ggplot(sobj@meta.data %>% 
+         dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, 
+                       pct.mito, pct.ribo, pct.H3N2) %>%
+         gather(metric,value,-orig.ident),
+       aes(x=orig.ident,y=value,fill=orig.ident)) + 
+  geom_boxplot(outlier.size=.5) + 
+  theme_classic() +
+  facet_wrap(~metric,ncol=2,scales='free_y') + 
+  theme(axis.text.x=element_blank())
+```
+
+```{r process}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+sobj <- subset(sobj, (pct.mito < 10) & (nFeature_RNA < 5000) & (nCount_RNA < 25000)) %>%
+  NormalizeData(normalization.method='LogNormalize',scale.factor=10000,verbose=FALSE) %>%
+  FindVariableFeatures(selection.method='vst',nfeatures=2000,verbose=FALSE) %>%
+  ScaleData(vars.to.regress=c('nCount_RNA'),verbose=FALSE) %>%
+  CellCycleScoring(s.features = s.genes, g2m.features = g2m.genes) %>%
+  ScaleData(vars.to.regress=c('S.Score','G2M.Score'),verbose=FALSE) %>%
+  RunPCA(features=VariableFeatures(.),verbose=FALSE) %>%
+  FindNeighbors(dims=1:20,verbose=FALSE) %>%
+  RunUMAP(dims=1:20,verbose=FALSE)
+```
+
+```{r integrate}
+sobjs <- SplitObject(sobj, split.by='orig.ident')
+anchors <- FindIntegrationAnchors(sobjs, dims=1:20, verbose=FALSE, reduction='rpca')
+sobj <- IntegrateData(anchors, dims=1:20, verbose=FALSE)
+DefaultAssay(sobj) <- "integrated"
+sobj <- ScaleData(sobj,vars.to.regress=c('S.Score','G2M.Score','nCount_RNA','pct.mito'),
+                  verbose = FALSE) %>%
+  RunPCA(npcs = 20, verbose = FALSE) %>%
+  FindNeighbors(dims=1:20, verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE) %>%
+  FindClusters(resolution=1.0, verbose=FALSE)
+```
+
+```{r show}
+DimPlot(sobj,reduction='umap',group.by='orig.ident')
+DimPlot(sobj,reduction='umap',group.by='infect')
+DimPlot(sobj,reduction='umap',group.by='Phase')
+DimPlot(sobj,reduction='umap',label=TRUE)
+```
+
+here's a dot plot of cluster markers.
+
+```{r markers}
+markers <- FindAllMarkers(sobj, only.pos = TRUE, min.pct = 0.25,
+                          thresh.use = 0.25,
+                          print.bar=FALSE, verbose=FALSE)
+
+write.csv(markers,'../data/seurat/lung_tissue_markers.csv',row.names=FALSE)
+
+top5 <- markers %>% 
+  group_by(cluster) %>% 
+  top_n(5, avg_log2FC)
+
+DotPlot(sobj, features = unique(top5$gene)) + 
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5))
+```
+
+```{r doublets}
+source('my_doubletFinder.R')
+DF <- list()
+for (sample in unique(sobj$orig.ident)) {
+  tmp <- subset(sobj,subset=orig.ident==sample)
+  DefaultAssay(tmp) <- 'RNA'
+  homotypic.prop <- modelHomotypic(Idents(tmp))
+  nExp_poi <- round(0.05*nrow(tmp@meta.data)) 
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  tmp <- my_doubletFinder(tmp, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi, reuse.pANN = FALSE)
+  tmp <- my_doubletFinder(tmp, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi.adj, reuse.pANN = "pANN")
+  DF[[sample]] <- tmp@meta.data[,'DF.classifications',drop=FALSE] %>%
+    tibble::rownames_to_column('cell')
+}
+sobj <- AddMetaData(sobj, do.call(rbind,DF) %>% tibble::remove_rownames() %>% tibble::column_to_rownames('cell'))
+DimPlot(sobj,group.by='DF.classifications', order='Doublet')
+table(sobj$DF.classifications)
+sobj <- subset(sobj, subset=DF.classifications=='Singlet')
+```
+
+```{r travaglini}
+travaglini <- readRDS('../data/seurat/travaglini_lung.rds')
+
+anchors <- FindTransferAnchors(reference = travaglini, query = sobj, dims = 1:20,
+                               features = intersect(row.names(travaglini@assays$RNA@scale.data),
+                                                    row.names(sobj@assays$integrated@scale.data)))
+pred <- TransferData(anchorset = anchors, refdata = travaglini$free_annotation, dims = 1:20)
+sobj <- AddMetaData(sobj, metadata=pred)
+sobj@meta.data %>%
+  dplyr::group_by(seurat_clusters,predicted.id) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=round(n/sum(n),2)) %>%
+  dplyr::filter(frac > .1)
+DimPlot(sobj, group.by='predicted.id', label=TRUE, repel=TRUE)
+DimPlot(sobj, label=TRUE)
+```
+
+```{r rename_clusters,fig.height=5,fig.width=7}
+sobj <- RenameIdents(sobj, 
+                     '0'='immune',
+                     '1'='immune',
+                     '2'='immune',
+                     '3'='immune',
+                     '4'='immune',
+                     '5'='immune',
+                     '6'='epithelial',
+                     '7'='immune',
+                     '8'='immune',
+                     '9'='epithelial',
+                     '10'='endothelial',
+                     '11'='immune',
+                     '12'='stromal',
+                     '13'='immune',
+                     '14'='endothelial',
+                     '15'='immune',
+                     '16'='immune',
+                     '17'='stromal',
+                     '18'='immune',
+                     '19'='endothelial',
+                     '20'='immune',
+                     '21'='endothelial',
+                     '22'='immune',
+                     '23'='stromal',
+                     '24'='immune',
+                     '25'='immune',
+                     '26'='epithelial',
+                     '27'='immune',
+                     '28'='stromal')
+
+DimPlot(sobj,label=TRUE,repel=TRUE)
+sobj$cluster <- Idents(sobj)
+```
+
+```{r get_pseudobulk}
+expr <- list()
+for (cluster in unique(sobj$cluster)) {
+  for (sample in unique(sobj@meta.data$orig.ident)) {
+    cells <- Cells(sobj)[(sobj@meta.data$orig.ident==sample) & (sobj$cluster==cluster)]
+    expr[[paste0(cluster,'_',sample)]] <- rowSums(sobj@assays$RNA@counts[,cells,drop=FALSE])
+  }
+}
+for (sample in unique(sobj@meta.data$orig.ident)) {
+  cells <- Cells(sobj)[(sobj@meta.data$orig.ident==sample)]
+  expr[[paste0('all_',sample)]] <- rowSums(sobj@assays$RNA@counts[,cells])
+}
+
+colData <- data.frame(cell.type=factor(gsub('_.*','',names(expr))),
+                      donor=factor(gsub('[^_]*_lung-([0-9]*[VC])-([BSAH3N2]*)',
+                                         '\\1',names(expr))),
+                      infect=factor(gsub('[^_]*_lung-([0-9]*[VC])-([BSAH3N2]*)',
+                                         '\\2',names(expr))),
+                      group=names(expr),
+                      row.names=names(expr))
+
+counts <- do.call(cbind,expr)
+```
+
+```{r DE_celltype, fig.width=10,fig.height=5}
+res <- list()
+for (cluster in c("epithelial")) {
+  take_row <- rowSums(counts) > 0
+  take_col <- (colSums(counts) > 0) & (colData[,'cell.type']==cluster)
+  dds <- DESeqDataSetFromMatrix(countData=counts[take_row,take_col],
+                                colData=colData[take_col,,drop=FALSE],
+                                design=~donor+infect)
+  dds <- estimateSizeFactors(dds, type='poscounts')
+  dds <- DESeq(dds)
+  res[[cluster]] <- lfcShrink(dds,coef='infect_H3N2_vs_BSA',
+                              type='normal',
+                              format="DataFrame") %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column('gene_name') %>%
+    dplyr::mutate(cluster=cluster)
+}
+
+write.csv(do.call(rbind,res),file=file.path('..','data','seurat','lung_tissue_pseudobulk_DE.csv'))
+```
+
+```{r save, cache=FALSE}
+saveRDS(sobj,file='../data/seurat/lung_tissue.rds')
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
+

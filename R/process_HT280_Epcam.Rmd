@@ -1,0 +1,221 @@
+---
+title: "HT280 +/- Epcam cells"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, warning=FALSE)
+library(Seurat)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(igraph)
+library(Matrix)
+library(tidyr)
+library(openxlsx)
+options(future.globals.maxSize = 10 * 1024 * 1024^2)
+```
+
+```{r get_data}
+samples <- c('AO22','AO23','AO34','AO35','AO36','AO37')
+
+sobjs <- list()
+for (sample in samples[1:2]) {
+  dge <- Read10X_h5(file.path('..','data','cellbender',paste0(sample,'_HT280_filtered.h5')))
+  colnames(dge) <- paste0(gsub('_','-',sample),'-HT280_',colnames(dge))
+  sobjs[[sample]] <- CreateSeuratObject(dge,project=sample,
+                                        assay='RNA',min.cells=1,min.features=500)
+}
+for (sample in samples[3:6]) {
+  dge <- Read10X_h5(file.path('..','data','cellbender',paste0(sample,'_HT280_Epcam_filtered.h5')))
+  colnames(dge) <- paste0(gsub('_','-',sample),'-HT280Epcam_',colnames(dge))
+  sobjs[[sample]] <- CreateSeuratObject(dge,project=sample,
+                                        assay='RNA',min.cells=1,min.features=500)
+}
+sobj <- merge(sobjs[[samples[1]]],sobjs[samples[2:6]])
+
+sobj[['donor']] <-  gsub('(AO[0-9]*)-.*','\\1',sobj@meta.data$orig.ident)
+sobj[['sort']] <- ifelse(grepl('Epcam',sobj$orig.ident),'HT280+/Epcam+','HT280+')
+sobj[['pct.mito']] <- PercentageFeatureSet(sobj, pattern='^MT-')
+sobj[['pct.ribo']] <- PercentageFeatureSet(sobj, pattern='^RP[SL][0-9]*$')
+```
+
+```{r stats}
+sobj@meta.data %>%
+  dplyr::group_by(orig.ident) %>%
+  dplyr::summarise(ncells=n(),
+                   nGene=median(nFeature_RNA),
+                   nUMI=median(nCount_RNA),
+                   pct.mito=median(pct.mito),
+                   pct.ribo=median(pct.ribo))
+
+ggplot(sobj@meta.data %>% 
+         dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, 
+                       pct.mito, pct.ribo) %>%
+         gather(metric,value,-orig.ident),
+       aes(x=orig.ident,y=value,fill=orig.ident)) + 
+  geom_boxplot(outlier.size=.5) + 
+  facet_wrap(~metric,ncol=4,scales='free_y') + 
+  theme_classic() +
+  theme(axis.text.x=element_blank()) 
+```
+
+```{r process}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+sobj <- subset(sobj, (pct.mito < 10) & (nFeature_RNA < 5000) & (nCount_RNA < 25000)) %>%
+  NormalizeData(normalization.method='LogNormalize',scale.factor=10000,verbose=FALSE) %>%
+  FindVariableFeatures(selection.method='vst',nfeatures=2000,verbose=FALSE) %>%
+  ScaleData(vars.to.regress=c('nCount_RNA'),verbose=FALSE) %>%
+  CellCycleScoring(s.features = s.genes, g2m.features = g2m.genes) %>%
+  RunPCA(features=VariableFeatures(.),verbose=FALSE) %>%
+  FindNeighbors(dims=1:20,verbose=FALSE) %>%
+  RunUMAP(dims=1:20,verbose=FALSE)
+```
+
+```{r integrate}
+sobjs <- SplitObject(sobj, split.by='orig.ident')
+anchors <- FindIntegrationAnchors(sobjs, dims=1:20, verbose=FALSE, reduction='rpca')
+sobj <- IntegrateData(anchors, dims=1:20, verbose=FALSE)
+DefaultAssay(sobj) <- "integrated"
+sobj <- ScaleData(sobj,
+                  verbose = FALSE) %>%
+  RunPCA(npcs = 20, verbose = FALSE) %>%
+  FindNeighbors(dims=1:20, verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE) %>%
+  FindClusters(verbose=FALSE)
+
+DefaultAssay(sobj) <- 'RNA'
+```
+
+```{r show_integrated,fig.width=6,fig.height=3.5}
+DimPlot(sobj,reduction='umap',group.by='donor')
+DimPlot(sobj,reduction='umap',group.by='sort')
+DimPlot(sobj,reduction='umap',group.by='Phase')
+DimPlot(sobj,reduction='umap',label=TRUE)
+```
+
+```{r doublets}
+source('my_doubletFinder.R')
+DF <- list()
+for (sample in unique(sobj$orig.ident)) {
+  tmp <- subset(sobj,subset=orig.ident==sample)
+  DefaultAssay(tmp) <- 'RNA'
+  homotypic.prop <- modelHomotypic(Idents(tmp))
+  nExp_poi <- round(0.05*nrow(tmp@meta.data)) 
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  tmp <- my_doubletFinder(tmp, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi, reuse.pANN = FALSE)
+  tmp <- my_doubletFinder(tmp, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi.adj, reuse.pANN = "pANN")
+  DF[[sample]] <- tmp@meta.data[,'DF.classifications',drop=FALSE] %>%
+    tibble::rownames_to_column('cell')
+}
+sobj <- AddMetaData(sobj, do.call(rbind,DF) %>% tibble::remove_rownames() %>% tibble::column_to_rownames('cell'))
+DimPlot(sobj,group.by='DF.classifications', order='Doublet')
+table(sobj$DF.classifications)
+sobj <- subset(sobj, subset=DF.classifications=='Singlet')
+```
+
+```{r travaglini}
+travaglini <- readRDS('../data/seurat/travaglini_lung.rds')
+
+integration.features <- SelectIntegrationFeatures(list(sobj,travaglini), assay=c('RNA','RNA'), verbose=FALSE)
+
+anchors <- FindTransferAnchors(reference = travaglini, query = sobj, dims = 1:20,
+                               features = integration.features,
+                               reference.assay='RNA',
+                               query.assay='RNA')
+
+pred <- TransferData(anchorset = anchors, refdata = travaglini$free_annotation, dims = 1:20, verbose=FALSE)
+sobj <- AddMetaData(sobj, metadata=pred)
+sobj@meta.data %>%
+  dplyr::group_by(seurat_clusters,predicted.id) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(seurat_clusters) %>%
+  dplyr::mutate(frac=n/sum(n)) %>%
+  dplyr::slice_max(frac,n=1)
+  
+DimPlot(sobj, group.by='predicted.id', label=TRUE, repel=TRUE, label.size=3)
+```
+
+```{r remove_contamination}
+sobj <- SplitObject(subset(sobj, idents=c(11,12,14,16,17), invert=TRUE), split.by='orig.ident') %>%
+  FindIntegrationAnchors(dims=1:20, verbose=FALSE) %>%
+  IntegrateData(dims=1:20, verbose=FALSE)
+DefaultAssay(sobj) <- "integrated"
+sobj <- ScaleData(sobj,verbose = FALSE) %>%
+  RunPCA(npcs = 20, verbose = FALSE) %>%
+  FindNeighbors(dims=1:20, verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE) %>%
+  FindClusters(verbose=FALSE)
+
+DefaultAssay(sobj) <- 'RNA'
+```
+
+```{r show_integrated_subset,fig.width=6,fig.height=3.5}
+DimPlot(sobj,reduction='umap',group.by='orig.ident')
+DimPlot(sobj,reduction='umap',group.by='Phase')
+DimPlot(sobj,reduction='umap',label=TRUE)
+DimPlot(sobj,reduction='umap',group.by='predicted.id', label=TRUE, repel=TRUE, label.size=3)
+```
+
+here's a dot plot of cluster markers.
+
+```{r markers,fig.width=15,fig.height=8}
+markers <- FindAllMarkers(sobj, only.pos = TRUE, min.pct = 0.1,
+                          thresh.use = 0.25,
+                          print.bar=FALSE, verbose=FALSE)
+
+write.csv(markers,file.path('..','data','seurat','HT280_markers.csv'),row.names=FALSE)
+markers <- read.csv(file.path('..','data','seurat','HT280_markers.csv'),
+                    stringsAsFactors=FALSE)
+
+top5 <- markers %>%
+  group_by(cluster) %>%
+  top_n(5, avg_log2FC)
+
+DotPlot(sobj, features = unique(top5$gene)) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5))
+```
+
+```{r ASCS_signature, fig.width=2,fig.height=2.5}
+adult_stem_cell_genes <- c('VSNL1','AKR1B1','NOTCH4','TMEM237','SAMD5','PKD2','NAP1L1','PTTG1','CDK6','CDCA7','ACSL4',
+                           'HELLS','IKBIP','PLTP','TMEM201','CACHD1','ILF3','DNMT1','USP31','FAM216A','SLC41A1','PFKM',
+                           'KANK1','SUPT16H','ADCY3','FGD1','PTPN14','C20orf27','LGR6','SLC16A7','JAM3','FBL','NASP',
+                           'RANBP1','PRNP','DSE','GPX7','KDELC1','FCHSD2','SLCO3A1','CCNB1IP1','LOC284023','NOL9','NKRF',
+                           'NUP107','RCC2','ARHGAP25','DDX46','TCOF1','GMPS')
+
+tmp <- AddModuleScore(sobj, list('ASCS'=adult_stem_cell_genes),
+                      name='score')
+
+sobj$ASCS_score <- tmp$score1
+sobj$cluster <- Idents(sobj)
+
+tmp <- FetchData(sobj,c('cluster','ASCS_score')) %>%
+  gather(set,score,-cluster) %>%
+  dplyr::group_by(set) %>%
+  dplyr::mutate(score=scale(score)) %>%
+  dplyr::filter(!is.na(cluster))
+ggplot(tmp,aes(x=cluster,y=score,fill=cluster)) +
+  geom_boxplot(outlier.shape=NA) +
+  facet_grid(.~set,scales='free_y') +
+  theme_classic() +
+  theme(axis.text.x=element_text(angle=90,vjust=.5,hjust=1),
+        legend.position='none',
+        strip.background=element_blank()) +
+  labs(x='cluster',y='scaled score')
+```
+
+```{r save_data,cache=FALSE}
+writeLines(Cells(sobj),'../data/seurat/HT280_Epcam_barcodes.txt')
+write.csv(sobj@meta.data,file='../data/seurat/HT280_Epcam_meta.csv')
+saveRDS(sobj,file='../data/seurat/HT280_Epcam.rds')
+```
+
+```{r sessionInfo}
+sessionInfo()
+```

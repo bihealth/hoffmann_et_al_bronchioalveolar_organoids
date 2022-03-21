@@ -1,0 +1,1414 @@
+---
+title: "Hoffman et al. figures"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup,warning=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, warning=FALSE)
+library(Seurat)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(igraph)
+library(Matrix)
+library(tidyr)
+library(openxlsx)
+library(tmod)
+library(DESeq2)
+library(dendextend)
+library(plyr)
+library(ggrepel)
+options(future.globals.maxSize = 10 * 1024 * 1024^2)
+```
+
+``` {r definitions}
+donor_map <- c('AO13'='donor1','AO15'='donor2','AO16'='donor3','AO18'='donor4',
+               'AO22'='donor5','AO23'='donor6','A022'='donor5','A023'='donor6',
+               'AO34'='donor7','AO35'='donor8','AO36'='donor9','AO37'='donor10',
+               '102C'='pat1','219V'='pat2')
+donor_colors <- list('donor1'='burlywood2','donor2'='lightblue3','donor3'='chartreuse3',
+                     'donor4'='lightgoldenrod1','donor5'='lightpink1',
+                     'donor6'='antiquewhite3','donor7'='burlywood2','donor8'='lightblue3',
+                     'donor9'='chartreuse3','donor10'='lightgoldenrod')
+cell_type_colors <- list('AT2'='darkolivegreen3',
+                         'basal'='sandybrown',
+                         'ciliated'='pink4', 
+                         'secretory'='chocolate3',
+                         'unclear'='gray',
+                         'H3N2+'='turquoise2',
+                         'AT1'='lightblue3',
+                         'club'='chocolate4',
+                         'intermediate'='darkolivegreen1',
+                         'proliferating'='navajowhite3',
+                         'proliferating (S)'='navajowhite1',
+                         'proliferating (G2/M)'='navajowhite4')
+
+low_color <- 'yellow2'
+high_color <- 'red3'
+
+protocol_colors <- list('pool'='gray80','HT2'='dodgerblue3')
+
+myspread <- function(df, key, value) {
+    # quote key
+    keyq <- rlang::enquo(key)
+    # break value vector into quotes
+    valueq <- rlang::enquo(value)
+    s <- rlang::quos(!!valueq)
+    df %>% gather(variable, value, !!!s) %>%
+        unite(temp, !!keyq, variable) %>%
+        spread(temp, value)
+}
+wb <- createWorkbook()
+```
+
+# pool organoids
+
+``` {r get_data_pool}
+pool <- readRDS(file.path('..','data','seurat','organoids_pool.rds'))
+pool <- RenameIdents(pool,
+                     c('0'='basal',
+                       '1'='secretory',
+                       '2'='basal',
+                       '3'='basal',
+                       '4'='basal',
+                       '5'='secretory',
+                       '6'='secretory',
+                       '7'='secretory',
+                       '8'='basal',
+                       '9'='secretory',
+                       '10'='basal',
+                       '11'='basal',
+                       '12'='basal',
+                       '13'='secretory',
+                       '14'='basal',
+                       '15'='ciliated',
+                       '16'='secretory',
+                       '17'='proliferating',
+                       '18'='ciliated',
+                       '19'='basal',
+                       '20'='basal'))
+pool[['donor']] <- revalue(gsub('-.*','',pool@meta.data$donor), donor_map)
+pool[['protocol']] <- 'pool'
+pool[['cluster']] <- Idents(pool)
+DefaultAssay(pool) <- 'RNA'
+```
+
+single cell transcriptomics of lung organoids (pool)
+
+-   `r length(unique(pool$orig.ident))` samples
+-   `r length(unique(pool$donor))` donors
+-   `r dim(pool)[2]` cells
+-   align samples with Seurat (Stuart, Butler et al. <https://doi.org/10.1016/j.cell.2019.05.031>)
+-   `r median(pool$nCount_RNA)` UMIs per cell (median)
+-   `r median(pool$nFeature_RNA)` genes per cell (median)
+
+show clustering and rough cell type annotation: no distinction between
+various classes of secretory acells even though clearly distinguishable
+in IFs
+
+``` {r Fig_6D,fig.width=5,fig.height=3.5}
+anno <- data.frame(x=c(-10,-10),
+                   xend=c(-8,-10),
+                   y=c(-6,-6),
+                   yend=c(-6,-4))
+anno_text <- data.frame(x=c(-9,-10.5),
+                        y=c(-6.5,-5),
+                        label=c('UMAP 1','UMAP 2'),
+                        angle=c(0,90))
+
+tmp <- FetchData(pool,c('UMAP_1','UMAP_2','seurat_clusters','cluster'))
+ggplot(tmp,aes(x=UMAP_1,y=UMAP_2,color=cluster)) + 
+  geom_point(size=.1) +
+  scale_color_manual(values=cell_type_colors) + 
+  geom_text(data=tmp %>%
+              dplyr::group_by(seurat_clusters) %>%
+              dplyr::summarise(x=median(UMAP_1),y=median(UMAP_2)),
+            aes(x=x,y=y,label=seurat_clusters),color='black',inherit.aes=FALSE,size=4) +
+  theme_void() + 
+  theme(legend.position=c(.2,.9),
+        legend.key.size=unit(.4, 'cm'),
+        legend.text = element_text(size=13)) +
+  guides(color = guide_legend(override.aes = list(size=5))) +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(2,'mm')),colour='black',size=1,inherit.aes=FALSE) + 
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=4,inherit.aes=FALSE) + 
+  coord_fixed() + 
+  labs(color=NULL)
+```
+
+panel showing expression of relevant marker genes, all on the same scale
+(log-transformed normalized counts)
+
+``` {r Fig_S4D,fig.width=3.5,fig.height=3}
+markers <- c('KRT5','TP63','MUC5B','MUC5AC')
+ggplot(FetchData(pool,c('UMAP_1','UMAP_2',markers)) %>%
+         gather(gene,expression,-c(UMAP_1,UMAP_2)) %>%
+         dplyr::mutate(gene=factor(gsub('rna_','',gene),levels=markers)) %>%
+         dplyr::arrange(gene,expression),
+       aes(x=UMAP_1,y=UMAP_2,color=expression)) + 
+  geom_point(size=.1) + 
+  facet_wrap(~gene,ncol=2) + 
+  scale_color_gradient(low=low_color,high=high_color, 
+                       na.value='gray80', 
+                       lim=c(1.e-6,NA)) +
+  guides(color=guide_colorbar(title.position='right', 
+                              title.theme=element_text(angle=90,hjust=.5,vjust=.5,size=10))) +
+  geom_segment(data=cbind(anno,data.frame(gene=markers[3])),
+               aes(x=x,y=y,xend=xend,yend=yend,gene=gene),
+               arrow=arrow(length=unit(1,'mm')),colour='black',size=.5) +
+  geom_text(data=cbind(anno_text,data.frame(gene=markers[3])),
+            aes(x=x,y=y,label=label,angle=angle,gene=gene),colour='black',size=1) +
+  coord_fixed() +
+  theme_void() +
+  theme(legend.key.size=unit(3,'mm')) 
+```
+
+panel showing transcriptome similarity of the main celltypes for
+different donors
+
+``` {r Fig_S4C_bottom,fig.width=3.5,fig.height=2}
+library(ggfortify)
+tmp <- AverageExpression(pool, assays='integrated', group.by=c('cluster','orig.ident'))$integrated
+pca <- prcomp(t(tmp),scale=TRUE)
+df <- data.frame(celltype=gsub('_.*','',colnames(tmp)),
+                 orig.ident=gsub('.*_','',colnames(tmp)),
+                 col=colnames(tmp)) %>%
+  dplyr::inner_join(pool@meta.data[,c('orig.ident','donor','protocol','batch','cluster')] %>%
+                     dplyr::mutate(celltype=cluster),
+                   by=c('orig.ident','celltype')) %>%
+  dplyr::distinct(orig.ident,celltype,.keep_all=TRUE) %>%
+  tibble::column_to_rownames('col')
+autoplot(pca, data=df, colour='donor',shape='celltype',size=3) + 
+  scale_colour_manual(values=donor_colors) +
+  scale_shape_manual(values=c('basal'=15,'ciliated'=16,'proliferating'=17,'secretory'=18)) +
+  theme_classic() +
+  theme(legend.key.size=unit(3,'mm'),
+        legend.title=element_blank()) +
+  labs(shape='',colour='')
+```
+
+
+show top 3 markers for each of the original clusters
+
+``` {r Fig_S4E,fig.width=8,fig.height=5}
+markers <- read.csv(file.path('..','data','seurat','organoids_pool_markers.csv'),
+                    stringsAsFactors=FALSE)
+
+top3 <- markers %>% 
+  dplyr::filter(pct.1 > .5) %>%
+  group_by(cluster) %>% 
+  top_n(3, avg_log2FC)
+
+DotPlot(pool, features = unique(top3$gene), group.by='seurat_clusters') + 
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5)) + 
+  coord_cartesian(clip = 'off') +
+  labs(x='',y='')
+```
+
+show cell type proportions
+
+``` {r Fig_S4C_top,fig.width=3.5,fig.height=2}
+ggplot(pool@meta.data %>% 
+         dplyr::group_by(orig.ident,donor,cluster) %>%
+         dplyr::summarise(n=n()) %>%
+         dplyr::mutate(frac=n/sum(n)),
+       aes(x=cluster,y=frac, fill=cluster)) + 
+  geom_boxplot(outlier.shape=NA) + #,position=position_dodge(width=.8)) + 
+  geom_point(height=0,size=2,aes(color=donor)) + 
+  geom_point(size=2,shape=1,colour="black") +
+  theme_classic() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1,vjust=1),
+        legend.key.size=unit(.5,'cm'),
+        legend.key.height=unit(.4,'cm'),
+        legend.margin=unit(.4,'cm'),
+        legend.position='none',
+        panel.spacing.x=unit(.4,'cm')) +
+  scale_fill_manual(values=cell_type_colors) +
+  scale_color_manual(values=donor_colors) + 
+  guides(fill=FALSE) +
+  labs(x=NULL,y='cell fraction',color=NULL)
+```
+
+show CONICS results on pool organoids
+
+```{r pool_CONICS,fig.width=4.5,fig.height=2.5}
+conics <- read.csv(file.path('..','data','CONICS','pool_CONICS.csv'),col.names=c('cell','conics_cluster'))
+
+md <- FetchData(pool, c('UMAP_1','UMAP_2','cluster')) %>%
+  tibble::rownames_to_column('cell') %>%
+  dplyr::inner_join(conics,by='cell') %>%
+  dplyr::mutate(conics_cluster=gsub('minor_','',conics_cluster)) %>%
+  dplyr::mutate(conics_cluster=revalue(conics_cluster,donor_map)) %>%
+  dplyr::mutate(conics_cluster=factor(conics_cluster,levels=c('major',setdiff(conics_cluster,'major')))) 
+ggplot(md %>%
+         dplyr::arrange(conics_cluster),
+       aes(x=UMAP_1,y=UMAP_2,color=conics_cluster)) + 
+  geom_point(size=.5) + 
+  geom_text(data=md %>%
+              dplyr::group_by(cluster) %>%
+              dplyr::summarise(x=median(UMAP_1),
+                               y=median(UMAP_2)),
+            aes(x=x,y=y,label=cluster),
+            color='black',
+            segment.size=.25,
+            segment.alpha=.5,
+            size=2) +
+  theme_void() + 
+  scale_color_manual(values=c('gray90',unname(donor_colors)[1:6],unname(donor_colors)),
+                     breaks=sort(setdiff(md$conics_cluster,'major'))) +
+  theme(aspect.ratio = 1) +
+  labs(color='CNV subclone') +
+  guides(color=guide_legend(ncol=1,override.aes = list(size=4))) +
+  coord_fixed(clip='off')
+```
+
+# HT2 organoids
+
+``` {r get_data_HT2}
+HT2 <- readRDS(file.path('..','data','seurat','organoids_HT2.rds'))
+HT2 <- RenameIdents(HT2,
+                     c('0'='basal',
+                       '1'='secretory',
+                       '2'='AT2',
+                       '3'='basal',
+                       '4'='secretory',
+                       '5'='basal',
+                       '6'='secretory',
+                       '7'='secretory',
+                       '8'='basal',
+                       '9'='proliferating',
+                       '10'='intermediate',
+                       '11'='AT2',
+                       '12'='secretory'))
+HT2[['donor']] <- revalue(HT2@meta.data$donor, donor_map)
+HT2[['cluster']] <- Idents(HT2)
+```
+
+single cell transcriptomics of lung organoids (HT2)
+
+-   `r length(unique(HT2$orig.ident))` samples
+-   `r length(unique(HT2$donor))` donors
+-   `r dim(HT2)[2]` cells
+-   align samples with Seurat (Stuart, Butler et al. <https://doi.org/10.1016/j.cell.2019.05.031>)
+-   `r median(HT2$nCount_RNA)` UMIs per cell (median)
+-   `r median(HT2$nFeature_RNA)` genes per cell (median)
+
+show clustering and rough cell type annotation: no distinction between
+various classes of secretory ("mucous") cells even though clearly
+distinguishable in IFs
+
+``` {r Fig_3E,fig.width=5,fig.height=3.5}
+anno <- data.frame(x=c(-6,-6),
+                   xend=c(-4,-6),
+                   y=c(-6,-6),
+                   yend=c(-6,-4))
+anno_text <- data.frame(x=c(-5,-6.5),
+                        y=c(-6.5,-5),
+                        label=c('UMAP 1','UMAP 2'),
+                        angle=c(0,90))
+
+tmp <- FetchData(HT2,c('UMAP_1','UMAP_2','seurat_clusters','cluster'))
+ggplot(tmp,aes(x=UMAP_1,y=UMAP_2,color=cluster)) + 
+  geom_point(size=.1) +
+  scale_color_manual(values=cell_type_colors) + 
+  geom_text(data=tmp %>%
+              dplyr::group_by(seurat_clusters) %>%
+              dplyr::summarise(x=median(UMAP_1),y=median(UMAP_2)),
+            aes(x=x,y=y,label=seurat_clusters),color='black',inherit.aes=FALSE,size=5) +
+  theme_void() + 
+  theme(legend.position=c(1,.2),
+        legend.key.size=unit(.4, 'cm'),
+        legend.text = element_text(size=13)) +
+  guides(color = guide_legend(override.aes = list(size=4))) +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(2,'mm')),colour='black',size=1,inherit.aes=FALSE) + 
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=4,inherit.aes=FALSE) + 
+  coord_fixed() + 
+  labs(color=NULL)
+```
+
+panel showing expression of relevant marker genes, all on the same scale
+(log-transformed normalized counts)
+
+``` {r Fig_3F,fig.width=3.5,fig.height=3.5}
+markers <- c('SFTPC','KRT5','HOPX','SCGB1A1')
+ggplot(FetchData(HT2,c('UMAP_1','UMAP_2',markers)) %>%
+         gather(gene,expression,-c(UMAP_1,UMAP_2)) %>%
+         dplyr::mutate(gene=factor(gsub('rna_','',gene),levels=markers)) %>%
+         dplyr::arrange(gene,expression),
+       aes(x=UMAP_1,y=UMAP_2,color=expression)) + 
+  geom_point(size=.25) + 
+  facet_wrap(~gene,ncol=2) + 
+  scale_color_gradient(low=low_color,high=high_color,
+                       na.value='gray80', 
+                       lim=c(1.e-6,NA)) +
+  guides(color=guide_colorbar(title.position='right', 
+                              title.theme=element_text(angle=90,hjust=.5,vjust=.5,size=10))) +
+  geom_segment(data=cbind(anno,data.frame(gene=markers[4])),
+               aes(x=x,y=y,xend=xend,yend=yend,gene=gene),
+               arrow=arrow(length=unit(1,'mm')),colour='black',size=.5) + 
+  geom_text(data=cbind(anno_text,data.frame(gene=markers[4])),
+            aes(x=x,y=y,label=label,angle=angle,gene=gene),colour='black',size=1.5) + 
+  coord_fixed() +
+  theme_void() +
+  theme(legend.key.size=unit(3,'mm')) 
+```
+
+panel showing that cell from different donors mix (this could be
+relatively small)
+
+``` {r Fig_S3D,fig.width=2.5,fig.height=2}
+DimPlot(HT2,group.by='donor',reduction='umap') +
+  scale_color_manual(values=donor_colors) +
+  theme_void() +
+  theme(legend.position=c(.95,.15),
+        legend.key.size=unit(.3, 'cm')) +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+            arrow=arrow(length=unit(3,'mm')),colour='black',size=.5) +
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=2)  +
+  coord_fixed() +
+  labs(title='')
+```
+
+
+panel showing transcriptome similarity of the main celltypes for
+different donors
+
+``` {r Fig_S3E,fig.width=3.5,fig.height=2}
+library(ggfortify)
+tmp <- AverageExpression(HT2, assays='integrated', group.by=c('cluster','orig.ident'))$integrated
+pca <- prcomp(t(tmp),scale=TRUE)
+df <- data.frame(celltype=gsub('_.*','',colnames(tmp)),
+                 orig.ident=gsub('.*_','',colnames(tmp)),
+                 col=colnames(tmp)) %>%
+  dplyr::inner_join(HT2@meta.data[,c('orig.ident','donor','protocol','cluster')] %>%
+                     dplyr::mutate(celltype=cluster),
+                   by=c('orig.ident','celltype')) %>%
+  dplyr::distinct(orig.ident,celltype,.keep_all=TRUE) %>%
+  tibble::column_to_rownames('col')
+autoplot(pca, data=df, colour='donor',shape='celltype',size=3) + 
+  scale_colour_manual(values=donor_colors) +
+  theme_classic() +
+  theme(legend.key.size=unit(3,'mm'),
+        legend.title=element_blank()) +
+  labs(shape='',colour='')
+```
+
+show cell type proportions
+
+``` {r Fig_3G,fig.width=2.5,fig.height=2}
+ggplot(HT2@meta.data %>% 
+         dplyr::group_by(orig.ident,donor,cluster) %>%
+         dplyr::summarise(n=n()) %>%
+         dplyr::mutate(frac=n/sum(n)),
+       aes(x=cluster,y=frac, fill=cluster)) + 
+  geom_boxplot(outlier.shape=NA) + #,position=position_dodge(width=.8)) + 
+  geom_point(height=0,size=2,aes(color=donor)) + 
+  geom_point(size=2,shape=1,colour="black") +
+  theme_classic() + 
+  theme(axis.text.x=element_text(angle=45,hjust=1,vjust=1),
+        legend.key.size=unit(.5,'cm'),
+        legend.key.height=unit(.4,'cm'),
+        legend.margin=unit(.4,'cm'),
+        legend.position=c(.8,.8),
+        panel.spacing.x=unit(.4,'cm')) +
+  scale_fill_manual(values=cell_type_colors) +
+  scale_color_manual(values=donor_colors) + 
+  guides(fill=FALSE) +
+  labs(x=NULL,y='cell fraction',color=NULL)
+```
+
+show CONICS results on HT2 organoids
+
+```{r HT2_CONICS,fig.width=4.5,fig.height=2.5}
+conics <- read.csv(file.path('..','data','CONICS','HT2_CONICS.csv'),col.names=c('cell','conics_cluster'))
+
+md <- FetchData(HT2, c('UMAP_1','UMAP_2','cluster')) %>%
+  tibble::rownames_to_column('cell') %>%
+  dplyr::inner_join(conics,by='cell') %>%
+  dplyr::mutate(conics_cluster=gsub('minor_','',conics_cluster)) %>%
+  dplyr::mutate(conics_cluster=revalue(conics_cluster,donor_map)) %>%
+  dplyr::mutate(conics_cluster=factor(conics_cluster,levels=c('major',setdiff(conics_cluster,'major')))) 
+ggplot(md %>%
+         dplyr::arrange(conics_cluster),
+       aes(x=UMAP_1,y=UMAP_2,color=conics_cluster)) + 
+  geom_point(size=.5) + 
+  geom_text(data=md %>%
+              dplyr::group_by(cluster) %>%
+              dplyr::summarise(x=median(UMAP_1),
+                               y=median(UMAP_2)),
+            aes(x=x,y=y,label=cluster),
+            color='black',
+            segment.size=.25,
+            segment.alpha=.5,
+            size=2) +
+  theme_void() + 
+  scale_color_manual(values=c('gray90',unname(donor_colors)[1:6],unname(donor_colors)),
+                     breaks=sort(setdiff(md$conics_cluster,'major'))) +
+  theme(aspect.ratio = 1) +
+  labs(color='CNV subclone') +
+  guides(color=guide_legend(ncol=1,override.aes = list(size=4))) +
+  coord_fixed(clip='off')
+```
+
+create combined embedding of HT2 organoids with epithelial cells from Travaglini et al.
+
+```{r prepare_Fig_S3C}
+HT2.sub <- subset(HT2, cells=sample(Cells(HT2),2000))
+HT2.sub$origin <- 'HT2_organoid'
+DefaultAssay(HT2.sub) <- 'integrated'
+
+travaglini <- readRDS('/fast/projects/cubi-corona/work/2020_Hocke/Travaglini_data/travaglini_lung_epi.rds')
+travaglini$origin <- 'travaglini'
+travaglini$free_annotation <- revalue(travaglini$free_annotation, c('Alveolar Epithelial Type 1'='AT1',
+                                                                    'Alveolar Epithelial Type 2'='AT2',
+                                                                    'Basal'='basal',
+                                                                    'Mucous'='mucous',
+                                                                    'Club'='club',
+                                                                    'Ciliated'='ciliated'))
+
+HT2.combined <- FindIntegrationAnchors(c(HT2.sub, travaglini), 
+                                       dims=1:20, verbose=FALSE) %>%
+  IntegrateData(dims=1:20, verbose=FALSE)
+DefaultAssay(HT2.combined) <- "integrated"
+HT2.combined <- ScaleData(HT2.combined,
+                          verbose = FALSE) %>%
+  RunPCA(npcs = 20, verbose = FALSE) %>%
+  FindNeighbors(dims=1:20, verbose = FALSE) %>%
+  RunUMAP(dims = 1:20, verbose = FALSE) 
+HT2.combined[['cluster']] <- ifelse(HT2.combined$origin=='travaglini',
+                                    HT2.combined$free_annotation,
+                                    HT2.combined$cluster)
+
+```
+
+```{r Fig_S3C, fig.width=3, fig.height=3}
+tmp <- FetchData(HT2.combined,c('UMAP_1','UMAP_2','cluster','origin'))
+ggplot(tmp,aes(x=UMAP_1,y=UMAP_2,color=cluster)) +
+  geom_point(size=.1,color='gray') +
+  geom_point(data=tmp %>% dplyr::filter(origin!='travaglini'),size=.5) +
+  geom_text(data=tmp %>%
+              dplyr::filter(origin=='travaglini') %>%
+              dplyr::group_by(cluster) %>%
+              dplyr::summarise(x=median(UMAP_1),y=median(UMAP_2)),
+            aes(x=x,y=y,label=cluster),color='black',inherit.aes=FALSE) +
+  scale_color_manual(values=cell_type_colors) +
+  theme_void() +
+  theme(legend.position='none') +
+  coord_fixed() 
+```
+
+# HT2 + pool organoids
+
+```{r get_data_control}
+control <- readRDS(file.path('..','data','seurat','organoids_control.rds'))
+control <- RenameIdents(control,
+                        c('0'='secretory',
+                          '1'='basal',
+                          '2'='secretory',
+                          '3'='basal',
+                          '4'='basal',
+                          '5'='basal',
+                          '6'='basal',
+                          '7'='AT2',
+                          '8'='secretory',
+                          '9'='secretory',
+                          '10'='basal',
+                          '11'='secretory',
+                          '12'='basal',
+                          '13'='proliferating',
+                          '14'='secretory',
+                          '15'='ciliated',
+                          '16'='AT2',
+                          '17'='unclear',
+                          '18'='proliferating'))
+control <- subset(control, ident='unclear', invert=TRUE)
+control[['donor']] <- revalue(control@meta.data$donor, donor_map)
+control[['cluster']] <- Idents(control)
+DefaultAssay(control) <- 'RNA'
+```
+
+single cell transcriptomics of lung organoids (pool + HT2)
+
+-   `r length(unique(control$orig.ident))` samples
+-   `r length(unique(control$donor))` donors
+-   `r dim(control)[2]` cells
+-   align samples with Seurat (Stuart, Butler et al. <https://doi.org/10.1016/j.cell.2019.05.031>)
+-   `r median(control$nCount_RNA)` UMIs per cell (median)
+-   `r median(control$nFeature_RNA)` genes per cell (median)
+
+show clustering and rough cell type annotation
+
+``` {r Fig_S5C,fig.width=8,fig.height=3.5}
+anno <- data.frame(x=c(-6,-6),
+                   xend=c(-4,-6),
+                   y=c(-6,-6),
+                   yend=c(-6,-4))
+anno_text <- data.frame(x=c(-5,-6.5),
+                        y=c(-6.5,-5),
+                        label=c('UMAP 1','UMAP 2'),
+                        angle=c(0,90))
+
+#DimPlot(HT2,label=TRUE,repel=TRUE) + 
+tmp <- FetchData(control,c('UMAP_1','UMAP_2','seurat_clusters','cluster','protocol'))
+ggplot(tmp,aes(x=UMAP_1,y=UMAP_2,color=cluster)) + 
+  geom_point(size=.1) +
+  scale_color_manual(values=cell_type_colors) + 
+  geom_text(data=tmp %>%
+              dplyr::group_by(seurat_clusters) %>%
+              dplyr::summarise(x=median(UMAP_1),y=median(UMAP_2)),
+            aes(x=x,y=y,label=seurat_clusters),color='black',inherit.aes=FALSE,size=4.5) +
+  theme_void() + 
+  theme(legend.position=c(.45,.4),
+        legend.key.size=unit(.3, 'cm'),
+        legend.text = element_text(size=10),
+        strip.text=element_text(size=12)) +
+  guides(color = guide_legend(override.aes = list(size=4))) +
+  geom_segment(data=cbind(anno,data.frame(protocol='HT2')),aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(2,'mm')),colour='black',size=1,inherit.aes=FALSE) + 
+  geom_text(data=cbind(anno_text,data.frame(protocol='HT2')),aes(x=x,y=y,label=label,angle=angle),size=3,inherit.aes=FALSE) + 
+  coord_fixed() + 
+  facet_wrap(~protocol,ncol=2) +
+  labs(color=NULL)
+```
+
+show differential genes (per cluster, only basal and secretory) between
+HT2 and pool samples
+
+``` {r prepare_Fig_6E}
+expr <- list()
+for (cluster in c('all','basal','secretory')) {
+  for (sample in unique(control@meta.data$orig.ident)) {
+    cells <- Cells(control)[(control@meta.data$orig.ident==sample) & (control$cluster==cluster)]
+    expr[[paste0(cluster,'_',sample)]] <- rowSums(control@assays$RNA@counts[,cells,drop=FALSE])
+  }
+}
+for (sample in unique(control@meta.data$orig.ident)) {
+  cells <- Cells(control)[(control@meta.data$orig.ident==sample)]
+  expr[[paste0('all_',sample)]] <- rowSums(control@assays$RNA@counts[,cells])
+}
+
+colData <- data.frame(cell.type=factor(gsub('_.*','',names(expr))),
+                      donor=factor(gsub('[^_]*_(AO[0-9]*)-([poolHT280]*)-([516hd]*)-([controlH3N2]*)',
+                                         '\\1',names(expr))),
+                      protocol=factor(gsub('[^_]*_(AO[0-9]*)-([poolHT280]*)-([516hd]*)-([controlH3N2]*)',
+                                         '\\2',names(expr)),
+                                    levels=c('pool','HT2')),
+                      group=names(expr),
+                      row.names=names(expr))
+
+counts <- do.call(cbind,expr)
+
+res <- list()
+for (cluster in unique(colData$cell.type)) {
+  take_row <- rowSums(counts) > 0
+  take_col <- (colSums(counts) > 0) & (colData[,'cell.type']==cluster)
+  try({
+    dds <- DESeqDataSetFromMatrix(countData=counts[take_row,take_col],
+                                  colData=colData[take_col,,drop=FALSE],
+                                  design=~donor+protocol)
+    dds <- estimateSizeFactors(dds, type='poscounts')
+    dds <- DESeq(dds)
+    res[[paste0(cluster,'_protocol')]] <- lfcShrink(dds,coef='protocol_HT2_vs_pool',format="DataFrame") %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column('gene_name') %>%
+      dplyr::mutate(cluster=cluster,contrast='protocol')
+  })
+}
+
+pseudobulk <- do.call(rbind,res)
+```
+
+```{r Fig_6E,fig.width=3,fig.height=7}
+clusters <- c('all','basal','secretory')
+
+genes <- pseudobulk %>%
+  dplyr::filter(!(is.na(padj)) & (padj < .05) & (cluster %in% clusters)) %>%
+  dplyr::slice_min(padj,n=50) %>%
+  dplyr::pull(gene_name) 
+
+df <- pseudobulk %>%
+  dplyr::filter((gene_name %in% genes) & (cluster %in% clusters)) %>%
+  dplyr::select(cluster,gene_name,log2FoldChange) %>% 
+  spread(cluster,log2FoldChange) %>%
+  tibble::column_to_rownames('gene_name')
+
+df[is.na(df)] <- 0
+hc <- hclust(dist(df))
+gene.order <- row.names(df)[order.hclust(hc)]
+hc <- hclust(dist(t(df)))
+group.order <- colnames(df)[order.hclust(hc)]
+
+ggplot(pseudobulk %>%
+         dplyr::filter((gene_name %in% genes) & (cluster %in% clusters)) %>%
+         dplyr::mutate(gene_name=factor(gene_name,levels=gene.order)),
+       aes(y=gene_name,x=cluster,size=-log10(padj),color=log2FoldChange)) + 
+  geom_point() + 
+  scale_color_gradient2(low='blue3',mid='gray',high='red3') +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45,hjust=1,vjust=1),
+        legend.key.size=unit(4,'mm')) +
+  labs(x='',y='', title='') + 
+  coord_cartesian(clip='off')
+```
+
+```{r table_DEGs_AO_vs_AvO}
+addWorksheet(wb, sheetName='DEGs AO vs AvO')
+writeData(wb, sheet='DEGs AO vs AvO',
+          x=pseudobulk %>% dplyr::filter(padj < .05, cluster %in% clusters) %>%
+            dplyr::select(-contrast),
+          rowNames=FALSE)
+```
+
+panel showing monocle pseudotime
+
+``` {r Fig_6F,fig.width=5,fig.height=2.5}
+plots <- FeaturePlot(control,'monocle_pseudotime',split.by='protocol',combine=FALSE,reduction='umap') 
+plots <- lapply(plots, function(pl) pl +
+                  scale_color_viridis_c(option = "magma") +
+                  theme_void() +
+                  theme(legend.position='none') +
+                  coord_fixed(clip='off') +
+                  labs(title=''))
+plot_grid(plotlist=plots,ncol=2)
+```
+
+# HT280 cells
+
+```{r get_data_HT280}
+HT280 <- readRDS(file.path('..','data','seurat','HT280_Epcam.rds'))
+HT280[['donor']] <- revalue(HT280@meta.data$donor, donor_map)
+HT280[['cluster']] <- Idents(HT280)
+```
+
+single cell transcriptomics of HT280-sorted cells
+
+-   `r length(unique(HT280$orig.ident))` samples
+-   `r length(unique(HT280$donor))` donors
+-   `r dim(HT280)[2]` cells
+-   align samples with Seurat (Stuart, Butler et al. <https://doi.org/10.1016/j.cell.2019.05.031>)
+-   `r median(HT280$nCount_RNA)` UMIs per cell (median)
+-   `r median(HT280$nFeature_RNA)` genes per cell (median)
+
+show clustering
+
+``` {r Fig_1B,fig.width=5,fig.height=3}
+anno <- data.frame(x=c(-7,-7),
+                   xend=c(-5,-7),
+                   y=c(-7,-7),
+                   yend=c(-7,-5))
+anno_text <- data.frame(x=c(-6,-7.5),
+                        y=c(-7.5,-6),
+                        label=c('UMAP 1','UMAP 2'),
+                        angle=c(0,90))
+
+#DimPlot(HT280,label=TRUE,repel=TRUE) + 
+tmp <- FetchData(HT280,c('UMAP_1','UMAP_2','seurat_clusters','sort'))
+ggplot(tmp,aes(x=UMAP_1,y=UMAP_2,color=seurat_clusters)) + 
+  geom_point(size=.1,alpha=.5) +
+  geom_text(data=tmp %>%
+              dplyr::group_by(seurat_clusters) %>%
+              dplyr::summarise(x=median(UMAP_1),y=median(UMAP_2)),
+            aes(x=x,y=y,label=seurat_clusters),color='black',inherit.aes=FALSE) +
+  theme_void() + 
+  theme(legend.position='none') +
+  guides(color = guide_legend(override.aes = list(size=5),ncol=3)) +
+  geom_segment(data=cbind(anno,data.frame(sort='HT280+')),
+               aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.5,inherit.aes=FALSE) + 
+  geom_text(data=cbind(anno_text,data.frame(sort='HT280+')),
+            aes(x=x,y=y,label=label,angle=angle),size=2,inherit.aes=FALSE) + 
+  coord_fixed() + 
+  facet_wrap(~sort,ncol=2) +
+  labs(color=NULL)
+```
+
+show top 3 markers for each cluster
+
+```{r Fig_S1D,fig.width=8,fig.height=4.5}
+markers <- read.csv(file.path('..','data','seurat','HT280_markers.csv'),
+                    stringsAsFactors=FALSE)
+
+top3 <- markers %>%
+  dplyr::filter(pct.1 > .5) %>%
+  group_by(cluster) %>%
+  top_n(3, avg_log2FC)
+
+DotPlot(HT280, features = unique(top3$gene), group.by='seurat_clusters') +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5)) +
+  coord_cartesian(clip = 'off') +
+  labs(x='',y='')
+```
+
+```{r table_markers_HT280}
+addWorksheet(wb, sheetName='markers HTII-280')
+writeData(wb, sheet='markers HTII-280',
+          x=markers,
+          rowNames=FALSE)
+```
+
+panel showing expression of relevant marker genes, all on the same scale
+(log-transformed normalized counts)
+
+``` {r Fig_1A,fig.width=4.5,fig.height=2.5}
+markers <- c('SFTPC','SFTPA1','SFTPB','KRT5','TP63','AGER','EMP2','SCGB1A1')
+ggplot(FetchData(HT280,c('UMAP_1','UMAP_2',markers)) %>%
+         gather(gene,expression,-c(UMAP_1,UMAP_2)) %>%
+         dplyr::mutate(gene=factor(gsub('rna_','',gene),levels=markers)) %>%
+         dplyr::arrange(gene,expression),
+       aes(x=UMAP_1,y=UMAP_2,color=expression)) + 
+  geom_point(size=.25) + 
+  facet_wrap(~gene,ncol=4) + 
+  scale_color_gradient(low=low_color,high=high_color,
+                       na.value='gray80', 
+                       lim=c(1.e-6,NA)) +
+  geom_segment(data=cbind(anno,data.frame(gene=factor(markers[5],levels=markers))),
+               aes(x=x,y=y,xend=xend,yend=yend,gene=gene),
+               arrow=arrow(length=unit(1.,'mm')),colour='black',size=.5) +
+  geom_text(data=cbind(anno_text,data.frame(gene=factor(markers[5],levels=markers))),
+            aes(x=x,y=y,label=label,angle=angle,gene=gene),colour='black',size=1.) +
+  guides(color=guide_colorbar(title.position='right', 
+                              title.theme=element_text(angle=90,hjust=.5,vjust=.5,size=10))) +
+  coord_fixed() +
+  theme_void() +
+  theme(legend.key.size=unit(4,'mm')) 
+```
+
+maybe show quality control & statistics 
+
+``` {r Fig_S1B_top,fig.width=4,fig.height=2.5}
+ggplot(HT280@meta.data %>%
+         dplyr::select(donor, nCount_RNA, nFeature_RNA) %>%
+         gather(metric,value,-donor) %>%
+         dplyr::mutate(metric=gsub('_RNA','s',metric),
+                       metric=ifelse(metric=='nCounts','# UMIs','# genes')),
+       aes(x=donor,y=value,fill=donor)) +
+  geom_boxplot(outlier.size=.5) +
+  scale_fill_manual(values=donor_colors) +
+  facet_wrap(~metric,ncol=2,scales='free_y') +
+  scale_y_log10() +
+  theme_classic() +
+  theme(axis.text.x=element_text(angle=45,hjust=1,vjust=1),
+        legend.position='none',
+        strip.background=element_blank()) +
+  labs(y='',x='')
+```
+
+panel showing that cell from different donors mix
+
+``` {r Fig_S1B_bottom,fig.width=2.5,fig.height=2}
+DimPlot(HT280,group.by='donor',reduction='umap',pt.size=.05) +
+  scale_color_manual(values=donor_colors) +
+  theme_void() +
+  theme(legend.position=c(.0,.85),
+        legend.key.size=unit(.3, 'cm')) +
+  labs(title='') +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+            arrow=arrow(length=unit(1,'mm')),colour='black',size=.5) +
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=1.25)  +
+  coord_fixed(clip='off')
+```
+
+show distribution between HT280+ and HT280+/Epcam+ sort
+
+```{r Fig_S1C,fig.width=4,fig.height=2}
+HT280@meta.data %>%
+  dplyr::group_by(seurat_clusters,sort) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(seurat_clusters) %>%
+  dplyr::mutate(frac=n/sum(n)) %>%
+  ggplot(aes(x=seurat_clusters,y=frac,fill=sort)) + 
+  geom_col() + 
+  geom_hline(yintercept=HT280@meta.data %>% dplyr::summarise(m=mean(sort=='HT280+/Epcam+')) %>% dplyr::pull(m),
+             color='black',size=.25) +
+  theme_classic() +
+  scale_fill_manual(values=c('HT280+'='gray65','HT280+/Epcam+'='gray35')) +
+  theme(legend.key.height=unit(4,'mm'),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5)) +
+  labs(x='cluster',y='fraction cells',fill='')
+```
+
+ASCS signature
+
+``` {r Fig_1C,fig.width=2.5,fig.height=2}
+tmp <- FetchData(HT280,c('cluster','ASCS_score')) %>%
+  dplyr::filter(!is.na(cluster))
+ggplot(tmp,aes(x=cluster,y=ASCS_score,fill=cluster)) + 
+  geom_boxplot(outlier.shape=NA) +
+  theme_classic() +
+  theme(axis.text.x=element_text(angle=90,vjust=.5,hjust=1),
+        legend.position='none',
+        strip.background=element_blank()) +
+  labs(x='cluster',y='ASCS score')
+```
+
+```{r table_ASCS_signature}
+ASCS_genes <- c('VSNL1','AKR1B1','NOTCH4','TMEM237','SAMD5','PKD2','NAP1L1','PTTG1','CDK6','CDCA7','ACSL4',
+                'HELLS','IKBIP','PLTP','TMEM201','CACHD1','ILF3','DNMT1','USP31','FAM216A','SLC41A1','PFKM',
+                'KANK1','SUPT16H','ADCY3','FGD1','PTPN14','C20orf27','LGR6','SLC16A7','JAM3','FBL','NASP',
+                'RANBP1','PRNP','DSE','GPX7','KDELC1','FCHSD2','SLCO3A1','CCNB1IP1','LOC284023','NOL9','NKRF',
+                'NUP107','RCC2','ARHGAP25','DDX46','TCOF1','GMPS')
+addWorksheet(wb, sheetName='ASCS signature genes')
+writeData(wb, sheet='ASCS signature genes',
+          x=ASCS_genes,
+          rowNames=FALSE)
+```
+
+here are the results of the SCENIC analysis: we construct regulons using transcription factor binding sites around promoters and assess how well expression of a TF regulon is correlated. 
+
+```{r Fig_1E,fig.width=5,fig.height=5}
+scenic <- read.csv(file.path('..','data','scenic','HT280_scenic_AUC.csv'),header=TRUE,row.names=1,check.names=FALSE)
+colnames(scenic) <- paste0(gsub('\\(\\+\\)','',gsub('\\(\\-\\)','-',colnames(scenic))),'regulon')
+HT280 <- AddMetaData(HT280, scenic)
+
+rss <- read.csv(file.path('..','data','scenic','HT280_regulon_specificity_scores.csv'),header=TRUE,row.names=1)
+row.names(rss) <- paste0(gsub('\\(\\+\\)','',gsub('\\(\\-\\)','-',row.names(rss))),'regulon')
+
+regulons <- rss %>%
+  tibble::rownames_to_column('regulon') %>%
+  gather(cluster,score,-regulon) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::slice_max(score,n=3) %>%
+  dplyr::pull(regulon) %>%
+  unique()
+
+tmp <- FetchData(HT280,c(make.names(regulons),'sort','cluster')) %>%
+  gather(set,AUC,-c(cluster,sort)) %>%
+  dplyr::mutate(set=gsub('_regulon','',set)) %>%
+  dplyr::group_by(set,cluster,sort) %>%
+  dplyr::summarise(AUC=mean(AUC,na.rm=TRUE)) %>%
+  dplyr::group_by(set) %>%
+  dplyr::mutate(AUC=scale(AUC)) 
+
+df <- tmp %>%
+  dplyr::mutate(tmp=paste0(sort,'_',cluster)) %>%
+  dplyr::select(set,tmp,AUC) %>%
+  spread(tmp,AUC) %>%
+  tibble::column_to_rownames('set')
+
+df[is.na(df)] <- 0
+hc <- hclust(dist(df))
+set.order <- row.names(df)[order.hclust(hc)]
+
+ggplot(tmp,aes(x=cluster,y=factor(set,levels=set.order),fill=AUC)) +
+  geom_tile() +
+  scale_fill_gradient2(low='blue3',high='red3',mid='gray',
+                       limits=c(-2.5,2.5),oob=scales::squish) +
+  theme_minimal() +
+  theme(legend.key.size=unit(4,'mm'),
+        axis.text.x=element_text(angle=90,vjust=.5,hjust=1)) +
+  facet_wrap(~sort,ncol=2) +
+  labs(x='cluster',y='',fill='AUC z-score')
+```
+
+load CONICS results on HT280 organoids
+
+```{r HT280_CONICS,fig.width=4.5,fig.height=2.5}
+conics <- read.csv(file.path('..','data','CONICS','HT280_CONICS.csv'),col.names=c('cell','conics_cluster'))
+
+md <- FetchData(HT280, c('UMAP_1','UMAP_2','cluster')) %>%
+  tibble::rownames_to_column('cell') %>%
+  dplyr::inner_join(conics,by='cell') %>%
+  dplyr::mutate(conics_cluster=gsub('minor_','',conics_cluster)) %>%
+  dplyr::mutate(conics_cluster=revalue(conics_cluster,donor_map)) %>%
+  dplyr::mutate(conics_cluster=factor(conics_cluster,levels=c('major',setdiff(conics_cluster,'major')))) 
+ggplot(md %>%
+         dplyr::arrange(conics_cluster),
+       aes(x=UMAP_1,y=UMAP_2,color=conics_cluster)) + 
+  geom_point(size=.5) + 
+  geom_text(data=md %>%
+              dplyr::group_by(cluster) %>%
+              dplyr::summarise(x=median(UMAP_1),
+                               y=median(UMAP_2)),
+            aes(x=x,y=y,label=cluster),
+            color='black',
+            segment.size=.25,
+            segment.alpha=.5,
+            size=2) +
+  theme_void() + 
+  scale_color_manual(values=c('gray90',unname(donor_colors)[1:6],unname(donor_colors)),
+                     breaks=sort(setdiff(md$conics_cluster,'major'))) +
+  theme(aspect.ratio = 1) +
+  labs(color='CNV subclone') +
+  guides(color=guide_legend(ncol=1,override.aes = list(size=4))) +
+  coord_cartesian(clip='off')
+```
+
+# bulk RNAseq
+
+```{r get_data_bulk}
+library(DESeq2)
+library(org.Hs.eg.db)
+library(purrr)
+
+samples <- c(outer(c(outer(c('ctrl_','GSK3_'),c('ctrl','CHIR'),FUN='paste0')),c('_1','_2'),FUN='paste0'))
+counts <- sapply(samples, function(x) read.csv(file.path('..','data','feature_counts',paste0(x,'.feature_counts')),
+                                               sep='\t',header=1,skip=1,
+                                               col.names=c('geneID','chr','start','end','strand','length',x))[,c('geneID',x)],
+                 simplify=FALSE)
+counts <- purrr::reduce(counts, dplyr::left_join, by = 'geneID') %>%
+  tibble::column_to_rownames('geneID')
+#dds <- readRDS(file.path('..','..','lung_bulk','20220201_results','DE','all','DESeq2','out','DESeq2.all.deseq2.rds'))
+dds <- DESeqDataSetFromMatrix(counts,
+                              data.frame(condition=factor(gsub('_[12]$','',samples),
+                                                          levels=c('ctrl_ctrl',
+                                                                   'ctrl_CHIR',
+                                                                   'GSK3_ctrl',
+                                                                   'GSK3_CHIR')),
+                                         row.names=samples),
+                              design=~condition)
+dds <- DESeq(dds)
+rld <- vst(dds)
+```
+
+compare log2 fold changes upon CHIR treatment in the GSK3-kd background vs. the mock control
+
+```{r Fig_5D,fig.width=5,fig.height=4}
+r1 <- results(dds, contrast=c(0,1,0,0))
+r2 <- results(dds, contrast=c(0,0,-1,1))
+r3 <- results(dds, contrast=c(0,-1,-1,1))
+
+r1s <- lfcShrink(dds,res=r1,contrast=c(0,-1,1,0,0),type='normal')
+r2s <- lfcShrink(dds,res=r2,contrast=c(0,0,0,-1,1),type='normal')
+r3s <- lfcShrink(dds,res=r3,contrast=c(0,1,-1,-1,1),type='normal')
+
+ensembl2eg <- as.data.frame(org.Hs.egENSEMBL2EG)
+symbol2eg <- as.data.frame(org.Hs.egSYMBOL2EG)
+ensembl2symbol <- ensembl2eg %>% 
+  dplyr::inner_join(symbol2eg, by='gene_id') %>% 
+  dplyr::select(-gene_id) %>% 
+  dplyr::distinct(symbol,.keep_all=TRUE)
+
+take <- r1$baseMean > 10
+
+df <- data.frame(lfc_1=r1s$log2FoldChange[take],
+                 lfc_2=r2s$log2FoldChange[take],
+                 p1=r1$padj[take],
+                 p2=r2$padj[take],
+                 m1=r1$baseMean[take],
+                 m2=r2$baseMean[take],
+                 diff=r3$padj[take] < .05,
+                 ensembl_id=gsub('\\..*','',row.names(r1)[take])) %>%
+  dplyr::left_join(ensembl2symbol,by='ensembl_id')
+
+use <- df %>% 
+  dplyr::filter((p1 < .05) |  (p2 < .05)) %>% 
+  dplyr::slice_max(pmax(abs(lfc_1),abs(lfc_2)),n=50) %>% 
+  dplyr::pull(symbol)
+
+ggplot(df,aes(x=lfc_1,y=lfc_2)) + 
+  geom_vline(xintercept=c(-.8,.8),color='gray',alpha=.5) +
+  geom_hline(yintercept=c(-.8,.8),color='gray',alpha=.5) +
+  annotate('rect',xmin=.8,xmax=Inf,ymin=.8,ymax=Inf,fill='indianred',alpha=.25) +
+  annotate('rect',xmin=-.8,xmax=-Inf,ymin=-.8,ymax=-Inf,fill='lightblue3',alpha=.25) +
+  geom_point(size=.25,alpha=.5) + 
+  theme_classic() +
+  geom_label_repel(data=df %>% dplyr::filter((symbol %in% c(use,'FOXM1','MYBL2','EGF')) | diff),
+                   aes(label=symbol),
+                   segment.size=.25,segment.alpha=.5,
+                   size=2,label.padding=0.05,label.size=0) +
+  geom_point(data=df %>% dplyr::filter(diff),
+             size=1,color='red') +
+  scale_color_manual(values=c('yes'='red','no'='black'),guide=FALSE) +
+  labs(x='log2 fold change CHIR vs ctrl (mock)',
+       y='log2 fold change CHIR vs ctrl (GSK3kd)')
+```
+
+```{r table_DEGs_CHIR_vs_ctrl}
+addWorksheet(wb, sheetName='DEGs CHIR vs ctrl (mock)')
+writeData(wb, sheet='DEGs CHIR vs ctrl (mock)',
+          x=r1s %>%
+            as.data.frame() %>%
+            tibble::rownames_to_column('ensembl_id') %>%
+            dplyr::mutate(ensembl_id=gsub('\\..*','',ensembl_id)) %>%
+            dplyr::left_join(ensembl2symbol,by='ensembl_id'),
+          rowNames=FALSE)
+addWorksheet(wb, sheetName='DEGs CHIR vs ctrl (GSK3b)')
+writeData(wb, sheet='DEGs CHIR vs ctrl (GSK3b)',
+          x=r2s %>%
+            as.data.frame() %>%
+            tibble::rownames_to_column('ensembl_id') %>%
+            dplyr::mutate(ensembl_id=gsub('\\..*','',ensembl_id)) %>%
+            dplyr::left_join(ensembl2symbol,by='ensembl_id'),
+          rowNames=FALSE)
+```
+
+show some interesting genes
+
+```{r Fig_5E,fig.width=10,fig.height=2.5}
+library(gtools)
+genes <- c('GSK3B','LGR5','LEF1','WIF1','FOXM1','EGF')
+pv <- data.frame(ctrl=r1$pvalue,
+                 GSK3b=r2$pvalue,
+                 ensembl_id=gsub('\\..*','',row.names(r1))) %>%
+  dplyr::left_join(ensembl2symbol,by='ensembl_id') %>%
+  dplyr::filter(symbol %in% genes) %>% 
+  gather(hairpin,pvalue,-c(symbol,ensembl_id)) %>%
+  dplyr::mutate(symbol=factor(symbol, levels=genes))
+
+cbind(data.frame(GSK3B=assay(rld)['ENSG00000082701.15',],
+                 LGR5=assay(rld)['ENSG00000139292.13',],
+                 LEF1=assay(rld)['ENSG00000138795.10',],
+                 FOXM1=assay(rld)['ENSG00000111206.12',],
+                 EGF=assay(rld)['ENSG00000138798.13',],
+                 WIF1=assay(rld)['ENSG00000156076.10',]),
+      colData(rld)[,c('condition'),drop=FALSE]) %>%
+  gather(symbol,expression,-condition)  %>%
+  dplyr::mutate(hairpin=gsub('_.*','',condition),
+                treatment=grepl('CHIR',condition),
+                hairpin=ifelse(hairpin=='GSK3','GSK3b',hairpin),
+                symbol=factor(symbol,level=genes)) %>%
+  ggplot(aes(x=hairpin,y=expression,fill=treatment)) + 
+  geom_point(position=position_dodge(width=.8)) + 
+  geom_boxplot(position=position_dodge(width=.8)) +
+  geom_text(data=pv, aes(x=hairpin,y=Inf,label=stars.pval(pvalue)), inherit.aes=FALSE, size=3) +
+  theme_classic() +
+  labs(y='expression',x='') +
+  scale_fill_manual(values=c('gray','forestgreen'),labels=c('ctrl','CHIR')) +
+  facet_wrap(~symbol,ncol=6,scales='free_y') +
+  theme(strip.background=element_blank()) +
+  coord_cartesian(clip='off')
+```
+
+# all organoid samples
+
+```{r get_data_all}
+all <- subset(readRDS(file.path('..','data','seurat','organoids_all.rds')), 
+              idents=c('basal','secretory','H3N2+',                                                                
+                       'AT2','proliferating','ciliated'))
+all$cluster <- Idents(all)
+all$donor <- revalue(all@meta.data$donor, donor_map)
+all$virus <- ifelse(all[['pct.H3N2']] > 0, 'positive','negative')
+DefaultAssay(all) <- 'RNA'
+```
+
+single cell transcriptomics of lung organoids (all samples)
+
+- `r length(unique(all@meta.data$orig.ident))` samples
+- `r length(unique(all@meta.data$donor))` donors
+- `r dim(all@assays$RNA@counts)[2]` cells
+- align samples with Seurat (Stuart, Butler et al. https://doi.org/10.1016/j.cell.2019.05.031)
+- `r median(all@meta.data$nCount_RNA)` UMIs per cell (median)
+- `r median(all@meta.data$nFeature_RNA)` genes per cell (median)
+
+show clustering and rough cell type annotation
+
+```{r Fig_7C_left,fig.width=5,fig.height=4}
+anno <- data.frame(x=c(-10,-10),
+                   xend=c(-10,-8),
+                   y=c(-8,-8),
+                   yend=c(-6,-8))
+anno_text <- data.frame(x=c(-9,-10.5),
+                        y=c(-8.5,-7),
+                        label=c('UMAP 1','UMAP 2'),
+                        angle=c(0,90))
+
+tmp <- FetchData(all,c('UMAP_1','UMAP_2','seurat_clusters','cluster'))
+ggplot(tmp,aes(x=UMAP_1,y=UMAP_2,color=cluster)) + 
+  geom_point(size=.25) +
+  scale_color_manual(values=cell_type_colors) + 
+  geom_text_repel(data=tmp %>%
+                    dplyr::group_by(seurat_clusters) %>%
+                    dplyr::summarise(x=median(UMAP_1),y=median(UMAP_2)),
+                  aes(x=x,y=y,label=seurat_clusters),color='black',inherit.aes=FALSE) +
+  theme_void() + 
+  theme(legend.position=c(.15,.55),
+        legend.key.size=unit(.4, 'cm')) +
+  guides(color = guide_legend(override.aes = list(size=5),ncol=1)) +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(2,'mm')),colour='black',size=1,inherit.aes=FALSE) + 
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=3,inherit.aes=FALSE) + 
+  coord_fixed() + 
+  labs(color=NULL)
+```
+
+```{r Fig_S6C_left,fig.width=3,fig.height=3}
+tmp <- FetchData(all, paste0('H3N2-',c('PA','PB1','PB2','NP')))
+all[['infection_status']] <- ifelse(rowSums(tmp > 0)==4,'productive infection',ifelse(rowSums(tmp > 0) > 0,'not productive','not infected'))
+DimPlot(all,group.by='infection_status', order=rev(c('not infected','not productive','productive infection'))) +
+  theme_void() +
+  theme(legend.position='top',
+        legend.direction='vertical',
+        legend.key.size=unit(.4, 'cm')) +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+           arrow=arrow(length=unit(2,'mm')),colour='black',size=.5) +
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=1.5)  +
+  scale_color_manual(values=c('not infected'='gray','not productive'='deepskyblue3','productive infection'='deeppink4')) +
+  coord_fixed(clip='off') + 
+  labs(title='')
+```
+
+show differential genes (per cluster) between infected and uninfected samples (remove H3N2 genes)
+
+```{r Fig_7C_right, fig.width=3.5, fig.height=5}
+pseudobulk_organoids <- read.csv(file.path('..','data','seurat','organoids_all_pseudobulk_DE.csv'),
+                                 header=TRUE,row.names=1,stringsAsFactors=FALSE)
+
+clusters <- c('all','basal','secretory','proliferating','infected','AT2','ciliated')
+
+genes <- pseudobulk_organoids %>%
+  dplyr::filter(!(is.na(padj)) & (padj < .05) & (cluster %in% clusters) & (contrast=='infect')) %>%
+  dplyr::filter(!grepl('^H3N2-',gene_name)) %>%
+  dplyr::slice_min(padj,n=50) %>%
+  dplyr::pull(gene_name) 
+
+df <- pseudobulk_organoids %>%
+  dplyr::filter((gene_name %in% genes) & (cluster %in% clusters) & (contrast=='infect')) %>%
+  dplyr::select(cluster,gene_name,log2FoldChange) %>% 
+  spread(cluster,log2FoldChange) %>%
+  tibble::column_to_rownames('gene_name')
+
+df[is.na(df)] <- 0
+hc <- hclust(dist(df))
+gene.order <- row.names(df)[order.hclust(hc)]
+hc <- hclust(dist(t(df)))
+group.order <- colnames(df)[order.hclust(hc)]
+
+ggplot(pseudobulk_organoids %>%
+         dplyr::filter((gene_name %in% genes) & (cluster %in% clusters) & (contrast=='infect')) %>%
+         dplyr::mutate(gene_name=factor(gene_name,levels=gene.order)),
+       aes(y=gene_name,x=cluster,size=-log10(padj),color=log2FoldChange)) + 
+  geom_point() + 
+  scale_color_gradient2(low='blue3',mid='gray',high='red3') +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.key.size=unit(4,'mm')) +
+  labs(x='',y='', title='infected vs.\nuninfected samples') + 
+  coord_cartesian(clip='off')
+```
+
+```{r table_DEGs_IAV_vs_control}
+addWorksheet(wb, sheetName='DEGs IAV vs. control')
+writeData(wb, sheet='DEGs IAV vs. control',
+          x=pseudobulk_organoids %>% 
+            dplyr::filter(padj < .05, cluster %in% clusters, contrast=='infect') %>%
+            dplyr::select(-contrast),
+          rowNames=FALSE)
+```
+
+compare HT2 vs. pool organoid resposne
+
+```{r Fig_7D, fig.width=4.5,fig.height=3.5}
+tmp <- pseudobulk_organoids %>%
+  dplyr::filter((cluster=='all') & (contrast %in% c('pool','HT2') & (baseMean > 100))) %>%
+  dplyr::select(gene_name,contrast,log2FoldChange) %>%
+  spread(contrast,log2FoldChange)
+
+sig <- pseudobulk_organoids %>%
+  dplyr::filter((cluster=='all') & (contrast %in% c('pool','HT2'))) %>%
+  dplyr::filter(padj < .01) %>%
+  dplyr::group_by(contrast) %>%
+  dplyr::slice_max(abs(log2FoldChange),n=20) %>%
+  dplyr::pull(gene_name)
+
+ggplot(tmp,aes(x=pool,y=HT2)) + 
+  geom_point(size=.5,alpha=.5) + 
+  geom_text_repel(data=tmp %>%
+                    dplyr::filter(gene_name %in% sig),
+                  aes(label=gene_name),
+                  segment.size=.25,
+                  segment.alpha=.5,
+                  size=2.5) + 
+  theme_classic() + 
+  annotate('text',x=0,y=5.5,
+           label=paste0('R=',signif(cor(tmp$HT2,tmp$pool,use='na.or.complete',method='spearman'),2))) +
+  labs(x='log2 fold change infected vs. control\n(pool organoids)',
+       y='log2 fold change infected vs. control\n(HT2 organoids)')
+
+```
+
+compare to scRNAseq results of infected lung tissue (only epithelial clusters)
+
+```{r Fig_7F,fig.width=4.5,fig.height=3.5}
+pseudobulk_tissue <- read.csv(file=file.path('..','data','seurat','lung_tissue_pseudobulk_DE.csv'),
+                              header=TRUE,row.names=1,stringsAsFactors=FALSE) %>%
+  dplyr::filter(cluster=='epithelial')
+
+compare <- pseudobulk_organoids %>%
+  dplyr::filter((cluster=='all') & (contrast=='infect') & (baseMean > 100)) %>%
+  dplyr::mutate(organoid_lfc=log2FoldChange,
+                organoid_padj=padj) %>%
+  dplyr::select(gene_name,organoid_lfc,organoid_padj,contrast) %>%
+  dplyr::left_join(pseudobulk_tissue %>%
+                     as.data.frame() %>%
+                     dplyr::mutate(tissue_lfc=log2FoldChange,
+                                   tissue_padj=padj) %>%
+                     dplyr::select(gene_name,tissue_lfc,tissue_padj),
+                    by='gene_name') %>%
+  dplyr::filter(!is.na(organoid_padj) & !is.na(tissue_padj)) 
+
+ggplot(compare,aes(x=tissue_lfc,y=organoid_lfc)) + 
+  geom_point(size=.5,alpha=.5) + 
+  geom_text_repel(data=compare %>%
+                    #dplyr::filter((tissue_padj < .1) & (organoid_padj < .1)) %>%
+                    dplyr::filter((organoid_padj < .01)) %>%
+                    dplyr::slice_max(tissue_lfc + organoid_lfc,n=25),
+                  aes(label=gene_name),
+                  segment.size=.25,
+                  segment.alpha=.5,
+                  size=2.5) +
+  theme_classic() + 
+  annotate('text',x=-.75,y=3.7,
+           label=paste0('R=',signif(cor(compare$tissue_lfc,compare$organoid_lfc,use='na.or.complete',method='spearman'),2))) +
+  labs(x='log2 fold change\nlung epithelial tissue scRNA-seq',
+       y='log2 fold change\nlung organoids scRNA-seq')
+```
+
+# lung tissue samples
+
+```{r get_data_lung}
+lung <- readRDS(file.path('..','data','seurat','lung_tissue.rds'))
+DefaultAssay(lung) <- 'RNA'
+lung$virus <- ifelse(lung[['pct.H3N2']] > 0, 'positive','negative')
+lung$cluster <- Idents(lung)
+```
+
+single cell transcriptomics of lung tissue samples (H3N2-infected vs. control)
+
+- `r length(unique(lung@meta.data$orig.ident))` samples
+- `r length(unique(lung@meta.data$donor))` donors
+- `r dim(lung@assays$RNA@counts)[2]` cells
+- align samples with Seurat (Stuart, Butler et al. https://doi.org/10.1016/j.cell.2019.05.031)
+- `r median(lung@meta.data$nCount_RNA)` UMIs per cell (median)
+- `r median(lung@meta.data$nFeature_RNA)` genes per cell (median)
+
+again with coarse cell type annotation
+
+```{r Fig_7E_left,fig.width=4,fig.height=3}
+anno <- data.frame(x=c(-12,-12),
+                   xend=c(-12,-9),
+                   y=c(-12,-12),
+                   yend=c(-9,-12))
+anno_text <- data.frame(x=c(-10.5,-13),
+                        y=c(-13,-10.5),
+                        label=c('UMAP 1','UMAP 2'),
+                        angle=c(0,90))
+
+cell_type_colors3 <- list('epithelial'='chocolate2',
+                          'immune'='aquamarine3',
+                          'stromal'='dodgerblue',
+                          'endothelial'='orchid1')
+
+#DimPlot(lung,label=TRUE,repel=TRUE) + 
+tmp <- FetchData(lung,c('UMAP_1','UMAP_2','cluster'))
+ggplot(tmp,aes(x=UMAP_1,y=UMAP_2,color=cluster)) + 
+  geom_point(size=.25,alpha=.5) +
+  scale_color_manual(values=cell_type_colors3) + 
+  geom_text(data=tmp %>%
+              dplyr::group_by(cluster) %>%
+              dplyr::summarise(x=median(UMAP_1),y=median(UMAP_2)),
+            aes(x=x,y=y,label=cluster),color='black',inherit.aes=FALSE) +
+  theme_void() + 
+  theme(legend.position='none') +
+  guides(color = guide_legend(override.aes = list(size=5))) +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(2,'mm')),colour='black',size=.5,inherit.aes=FALSE) + 
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=2,inherit.aes=FALSE) + 
+  coord_fixed() + 
+  labs(color=NULL)
+```
+
+panel showing expression of relevant marker genes, all on the same scale (log-transformed normalized counts)
+
+```{r Fig_S6D,fig.width=4,fig.height=3.5}
+markers <- c('EPCAM','COL1A2','CLDN5','PTPRC')
+ggplot(FetchData(lung,c('UMAP_1','UMAP_2',markers)) %>%
+         gather(gene,expression,-c(UMAP_1,UMAP_2)) %>%
+         dplyr::mutate(gene=factor(gsub('rna_','',gene),levels=markers)) %>%
+         dplyr::arrange(gene,expression),
+       aes(x=UMAP_1,y=UMAP_2,color=expression)) + 
+  geom_point(size=.25) + 
+  facet_wrap(~gene,ncol=2) + 
+  scale_color_gradient(low=low_color,high=high_color,
+                       na.value='gray80', 
+                       lim=c(1.e-6,NA)) +
+  geom_segment(data=cbind(anno,data.frame(gene=markers[1])),
+               aes(x=x,y=y,xend=xend,yend=yend,gene=gene),
+               arrow=arrow(length=unit(1,'mm')),colour='black',size=.25) +
+  geom_text(data=cbind(anno_text,data.frame(gene=markers[1])),
+            aes(x=x,y=y,label=label,angle=angle,gene=gene),colour='black',size=1) +
+  guides(color=guide_colorbar(title.position='right', 
+                              title.theme=element_text(angle=90,hjust=.5,vjust=.5,size=10))) +
+  coord_fixed() +
+  theme_void() +
+  theme(legend.key.size=unit(4,'mm'))
+```
+
+panel showing virus-positive cells (only infected samples shown here)
+
+```{r Fig_7E_right,fig.width=4,fig.height=3}
+DimPlot(subset(lung,infect=='H3N2'),group.by='virus',order=rev(c('negative','positive'))) +
+  theme_void() +
+  theme(legend.position=c(.9,.9),
+        legend.key.size=unit(.4, 'cm')) +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.5,inherit.aes=FALSE) + 
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=2,inherit.aes=FALSE) + 
+  scale_color_manual(values=list('negative'='gray',positive='deeppink4')) +
+  coord_fixed() +
+  labs(title='')
+```
+
+panel showing productive and non-productive infection
+
+```{r Fig_S6C_right,fig.width=4,fig.height=3}
+tmp <- FetchData(lung, paste0('H3N2-',c('PA','PB1','PB2','NP')))
+lung[['infection_status']] <- ifelse(rowSums(tmp > 0)==4,'productive infection',ifelse(rowSums(tmp > 0) > 0,'not productive','not infected'))
+DimPlot(lung,group.by='infection_status',order=rev(c('not infected','not productive','productive infection'))) +
+  theme_void() +
+  theme(legend.position='none') +
+  geom_segment(data=anno,aes(x=x,y=y,xend=xend,yend=yend),
+            arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.5) +
+  geom_text(data=anno_text,aes(x=x,y=y,label=label,angle=angle),size=1.25)  +
+  scale_color_manual(values=c('not infected'='gray','not productive'='deepskyblue3',
+                              'productive infection'='deeppink4')) +
+  coord_fixed() +
+  labs(title='')
+```
+
+load CONICS results on lung tissue
+
+```{r lung_CONICS,fig.width=4.5,fig.height=2.5}
+conics <- read.csv(file.path('..','data','CONICS','lung_CONICS.csv'),col.names=c('cell','conics_cluster'))
+
+md <- FetchData(lung, c('UMAP_1','UMAP_2','cluster')) %>%
+  tibble::rownames_to_column('cell') %>%
+  dplyr::inner_join(conics,by='cell') %>%
+  dplyr::mutate(conics_cluster=gsub('minor_','',conics_cluster)) %>%
+  dplyr::mutate(conics_cluster=revalue(conics_cluster,donor_map)) %>%
+  dplyr::mutate(conics_cluster=factor(conics_cluster,levels=c('major',setdiff(conics_cluster,'major')))) 
+ggplot(md %>%
+         dplyr::arrange(conics_cluster),
+       aes(x=UMAP_1,y=UMAP_2,color=conics_cluster)) + 
+  geom_point(size=.5) + 
+  geom_text(data=md %>%
+              dplyr::group_by(cluster) %>%
+              dplyr::summarise(x=median(UMAP_1),
+                               y=median(UMAP_2)),
+            aes(x=x,y=y,label=cluster),
+            color='black',
+            segment.size=.25,
+            segment.alpha=.5,
+            size=2) +
+  theme_void() + 
+  scale_color_manual(values=c('gray90',unname(donor_colors)[1:6],unname(donor_colors)),
+                     breaks=sort(setdiff(md$conics_cluster,'major'))) +
+  theme(aspect.ratio = 1) +
+  labs(color='CNV subclone') +
+  guides(color=guide_legend(ncol=1,override.aes = list(size=4))) +
+  coord_fixed(clip='off')
+```
+
+```{r save_tables,cache=FALSE}
+saveWorkbook(wb, file = "SuppTables.xlsx", overwrite=TRUE)
+```
+
+```{r sessionInfo}
+sessionInfo()
+```

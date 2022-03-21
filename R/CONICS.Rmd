@@ -1,0 +1,239 @@
+---
+title: "CONICS"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, 
+                      warning=FALSE, dev=c('png','pdf','tiff'), dpi=300,
+                      dev.args = list(pdf = list(colormodel = 'cmyk', useDingbats = FALSE), 
+                                      tiff = list(compression = 'lzw')))
+library(Seurat)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(igraph)
+library(Matrix)
+library(tidyr)
+library(CONICSmat)
+library(plyr)
+options(future.globals.maxSize = 10 * 1024 * 1024^2)
+```
+
+# pool organoids
+
+```{r get_data_pool}
+pool <- readRDS('../data/seurat/organoids_pool.rds')
+pool$donor <- revalue(gsub('-.*','',pool@meta.data$donor))
+```
+
+```{r CONICS_pool}
+gene_pos <- read.table('../data/CONICS/gene_positions.txt',sep='\t',header=FALSE)
+colnames(gene_pos) <- c('ensembl_gene_id','hgnc_symbol','chromosome_name','start_position','end_position')
+chromosome_arms <- read.table("../data/CONICS/chromosome_arm_positions_grch38.txt",sep="\t",row.names = 1,header = T)
+ 
+l_pool <- list()
+log2mat <- list()
+for (donor in unique(pool$donor)) {
+  take <- pool$donor==donor
+  mat <- as.matrix(pool@assays$RNA@counts[,take])
+  log2mat[[donor]] <- CONICSmat::normMat(mat)
+  log2mat[[donor]] <- CONICSmat::filterMatrix(log2mat[[donor]],gene_pos[,"hgnc_symbol"],minCells=5)
+  nF <- CONICSmat::calcNormFactors(log2mat[[donor]])
+  capture.output(l_pool[[donor]] <- CONICSmat::plotAll(log2mat[[donor]],nF,
+                                                       chromosome_arms,
+                                                       gene_pos,paste0('../data/CONICS/pool_',donor)),
+                 file='/dev/null')
+}
+```
+
+```{r conics_clustering_pool,fig.width=8,fig.height=5}
+hi.pool <- lapply(names(l_pool), function(donor) plotHistogram(l_pool[[donor]],
+                                                               log2mat[[donor]],
+                                                               clusters=2,
+                                                               zscoreThreshold=4,
+                                                               patients=pool$orig.ident[pool$donor==donor],
+                                                               celltypes=pool$seurat_clusters[pool$donor==donor]))
+names(hi.pool) <- names(l_pool)
+```
+
+```{r conics_umap_pool,fig.width=6,fig.height=5}
+df <- list()
+for (d in names(hi.pool)) {
+  df[[d]] <- data.frame(conics_cluster=ifelse(hi.pool[[d]]==1,'major',paste0('minor_',d)),
+                        cell=names(hi.pool[[d]]))
+}
+DimPlot(AddMetaData(pool,do.call(rbind,df) %>%
+                      tibble::remove_rownames() %>%
+                      tibble::column_to_rownames('cell')), 
+        group.by='conics_cluster',order=TRUE)
+```
+
+```{r save_pool}
+write.csv(do.call(rbind,df) %>%
+            tibble::remove_rownames() %>%
+            tibble::column_to_rownames('cell'),
+          '../data/CONICS/pool_CONICS.csv')
+```
+  
+# HT2 organoids
+
+```{r get_data_HT2}
+HT2 <- readRDS('../data/seurat/organoids_HT2.rds')
+```
+
+```{r CONICS_HT2}
+l_HT2 <- list()
+log2mat <- list()
+for (donor in unique(HT2$donor)) {
+  take <- HT2$donor==donor
+  mat <- as.matrix(HT2@assays$RNA@counts[,take])
+  log2mat[[donor]] <- CONICSmat::normMat(mat)
+  log2mat[[donor]] <- CONICSmat::filterMatrix(log2mat[[donor]],gene_pos[,"hgnc_symbol"],minCells=5)
+  nF <- CONICSmat::calcNormFactors(log2mat[[donor]])
+  capture.output(l_HT2[[donor]] <- CONICSmat::plotAll(log2mat[[donor]],nF,
+                                                      chromosome_arms,
+                                                      gene_pos,paste0('../data/CONICS/HT2_',donor)),
+                 file='/dev/null')
+}
+```
+
+```{r conics_clustering_HT2,fig.width=8,fig.height=5}
+hi.HT2 <- lapply(names(l_HT2), function(donor) plotHistogram(l_HT2[[donor]],
+                                                               log2mat[[donor]],
+                                                               clusters=2,
+                                                               zscoreThreshold=4,
+                                                               patients=HT2$orig.ident[HT2$donor==donor],
+                                                               celltypes=HT2$seurat_clusters[HT2$donor==donor]))
+names(hi.HT2) <- names(l_HT2)
+```
+
+```{r conics_umap_HT2,fig.width=6,fig.height=5}
+df <- list()
+for (d in names(hi.HT2)) {
+  df[[d]] <- data.frame(conics_cluster=ifelse(hi.HT2[[d]]==1,'major',paste0('minor_',d)),
+                        cell=names(hi.HT2[[d]]))
+}
+DimPlot(AddMetaData(HT2,do.call(rbind,df) %>%
+                      tibble::remove_rownames() %>%
+                      tibble::column_to_rownames('cell')), 
+        group.by='conics_cluster',order=TRUE)
+```
+
+```{r save_HT2}
+write.csv(do.call(rbind,df) %>%
+            tibble::remove_rownames() %>%
+            tibble::column_to_rownames('cell'),
+          '../data/CONICS/HT2_CONICS.csv')
+```
+
+# HT280 cells
+
+```{r get_data_HT280}
+HT280 <- readRDS('../data/seurat/HT280_Epcam.rds')
+```
+
+```{r CONICS_HT280}
+l_HT280 <- list()
+log2mat <- list()
+for (donor in unique(HT280$donor)) {
+  take <- HT280$donor==donor
+  mat <- as.matrix(HT280@assays$RNA@counts[,take])
+  log2mat[[donor]] <- CONICSmat::normMat(mat)
+  log2mat[[donor]] <- CONICSmat::filterMatrix(log2mat[[donor]],gene_pos[,"hgnc_symbol"],minCells=5)
+  nF <- CONICSmat::calcNormFactors(log2mat[[donor]])
+  capture.output(l_HT280[[donor]] <- CONICSmat::plotAll(log2mat[[donor]],nF,
+                                                            chromosome_arms,
+                                                       gene_pos,paste0('../data/CONICS/HT280_',donor)),
+                 file='/dev/null')
+}
+```
+
+```{r conics_clustering_HT280,fig.width=8,fig.height=5}
+hi.HT280 <- lapply(names(l_HT280), function(donor) plotHistogram(l_HT280[[donor]],
+                                                               log2mat[[donor]],
+                                                               clusters=2,
+                                                               zscoreThreshold=4,
+                                                               patients=HT280$orig.ident[HT280$donor==donor],
+                                                               celltypes=HT280$seurat_clusters[HT280$donor==donor]))
+names(hi.HT280) <- names(l_HT280)
+```
+
+```{r conics_umap_HT280,fig.width=6,fig.height=5}
+df <- list()
+for (d in names(hi.HT280)) {
+  df[[d]] <- data.frame(conics_cluster=ifelse(hi.HT280[[d]]==1,'major',paste0('minor_',d)),
+                        cell=names(hi.HT280[[d]]))
+}
+DimPlot(AddMetaData(HT280,do.call(rbind,df) %>%
+                      tibble::remove_rownames() %>%
+                      tibble::column_to_rownames('cell')), 
+        group.by='conics_cluster',order=TRUE)
+```
+
+```{r save_HT280}
+write.csv(do.call(rbind,df) %>%
+            tibble::remove_rownames() %>%
+            tibble::column_to_rownames('cell'),
+          '../data/CONICS/HT280_CONICS.csv')
+```
+
+# lung tissue 
+
+```{r get_data_lung}
+lung <- readRDS('../data/seurat/lung_tissue.rds')
+lung$cluster <- Idents(lung)
+```
+
+```{r CONICS_lung}
+l_lung <- list()
+log2mat <- list()
+for (donor in unique(lung$donor)) {
+  take <- lung$donor==donor
+  mat <- as.matrix(lung@assays$RNA@counts[,take])
+  log2mat[[donor]] <- CONICSmat::normMat(mat)
+  log2mat[[donor]] <- CONICSmat::filterMatrix(log2mat[[donor]],gene_pos[,"hgnc_symbol"],minCells=5)
+  nF <- CONICSmat::calcNormFactors(log2mat[[donor]])
+  capture.output(l_lung[[donor]] <- CONICSmat::plotAll(log2mat[[donor]],nF,
+                                                            chromosome_arms,
+                                                       gene_pos,paste0('../data/CONICS/lung_',donor)),
+                 file='/dev/null')
+}
+```
+
+```{r conics_clustering_lung,fig.width=8,fig.height=5}
+hi.lung <- lapply(names(l_lung), function(donor) plotHistogram(l_lung[[donor]],
+                                                               log2mat[[donor]],
+                                                               clusters=2,
+                                                               zscoreThreshold=4,
+                                                               patients=lung$orig.ident[lung$donor==donor],
+                                                               celltypes=lung$seurat_clusters[lung$donor==donor]))
+names(hi.lung) <- names(l_lung)
+```
+
+```{r conics_umap_lung,fig.width=6,fig.height=5}
+df <- list()
+for (d in names(hi.lung)) {
+  df[[d]] <- data.frame(conics_cluster=ifelse(hi.lung[[d]]==1,'major',paste0('minor_',d)),
+                        cell=names(hi.lung[[d]]))
+}
+DimPlot(lung, group.by='cluster', label=TRUE, repel=TRUE)
+DimPlot(AddMetaData(lung,do.call(rbind,df) %>%
+                      tibble::remove_rownames() %>%
+                      tibble::column_to_rownames('cell')), 
+        group.by='conics_cluster',order=TRUE)
+```
+
+```{r save_lung}
+write.csv(do.call(rbind,df) %>%
+            tibble::remove_rownames() %>%
+            tibble::column_to_rownames('cell'),
+          '../data/CONICS/lung_CONICS.csv')
+```
